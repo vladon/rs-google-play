@@ -302,6 +302,20 @@ impl Gpapi {
     pub async fn login(
         &mut self,
     ) -> Result<(), GpapiError> {
+        self.login_inner(true).await
+    }
+
+    /// Log in without requesting the Terms of Service endpoint.
+    ///
+    /// This matches clients that authenticate with a pre-issued AUTH token and deliberately do not
+    /// accept or inspect account Terms of Service during session creation.
+    pub async fn login_without_toc(
+        &mut self,
+    ) -> Result<(), GpapiError> {
+        self.login_inner(false).await
+    }
+
+    async fn login_inner(&mut self, request_toc: bool) -> Result<(), GpapiError> {
         self.checkin().await?;
         if let Some(upload_device_config_token) = self.upload_device_config().await? {
             self.device_config_token =
@@ -312,7 +326,9 @@ impl Gpapi {
                 self.request_auth_token().await?;
             }
 
-            self.toc().await?;
+            if request_toc {
+                self.toc().await?;
+            }
             Ok(())
         } else {
             Err("No device config token".into())
