@@ -832,6 +832,11 @@ impl Gpapi {
         params.insert("token_request_options", String::from("CAA4AVAB"));
         params.insert("check_email", String::from("1"));
         params.insert("system_partition", String::from("1"));
+        // Google started rejecting otherwise valid AAS-to-Play AUTH exchanges with
+        // `Error=MissingDroidguard` in 2026. Aurora Store sends the explicit null
+        // sentinel when no DroidGuard result is available, which preserves the
+        // token-only flow used by clients without Google Play Services.
+        params.insert("droidguard_results", String::from("null"));
     }
 
     async fn upload_device_config(
@@ -1257,6 +1262,17 @@ mod tests {
                 assert!(api.auth_token.is_some());
                 assert!(api.dfe_cookie.is_some() || api.tos_token.is_some());
             }
+        }
+
+        #[test]
+        fn auth_request_declares_missing_droidguard_result() {
+            let mut api = Gpapi::new("px_9a", "example@example.com");
+            api.set_aas_token("test-aas-token");
+            let mut params = HashMap::new();
+
+            api.append_auth_params(&mut params);
+
+            assert_eq!(params.get("droidguard_results"), Some(&"null".to_string()));
         }
 
         #[tokio::test]
