@@ -106,7 +106,6 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use configparser::ini::Ini;
 use futures::future::TryFutureExt;
 use prost::Message;
-use rand::RngCore;
 use reqwest::header::{HeaderMap, HeaderValue, HeaderName};
 use reqwest::Url;
 use tokio_dl_stream_to_disk::AsyncDownload;
@@ -692,7 +691,7 @@ impl Gpapi {
         let version_code = u64::try_from(version_code)
             .map_err(|_| GpapiError::new(GpapiErrorKind::InvalidApp))?;
         let mut nonce_bytes = [0_u8; 256];
-        rand::rng().fill_bytes(&mut nonce_bytes);
+        getrandom::fill(&mut nonce_bytes)?;
         let request = build_acquire_request(
             pkg_name.to_string(),
             version_code,

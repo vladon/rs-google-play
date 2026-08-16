@@ -21,7 +21,7 @@ base64 = "0.22"
 googleplay-protobuf = "3"
 bincode = "2"
 futures = "0.3"
-rand = "0.9"
+getrandom = "0.4"
 tokio-dl-stream-to-disk = "1"
 serde = { version = "1", features = ["derive"] }
 configparser = "3"
