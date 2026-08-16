@@ -102,9 +102,11 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use configparser::ini::Ini;
 use futures::future::TryFutureExt;
 use prost::Message;
+use rand::RngCore;
 use reqwest::header::{HeaderMap, HeaderValue, HeaderName};
 use reqwest::Url;
 use tokio_dl_stream_to_disk::AsyncDownload;
@@ -137,6 +139,88 @@ type SplitsDownloadInfo = Vec<(Option<String>, Option<String>)>;
 type AdditionalFilesDownloadInfo = Vec<(Option<String>, Option<String>)>;
 type DexMetadataURL = Option<String>;
 type DownloadInfo = (MainAPKDownloadURL, SplitsDownloadInfo, AdditionalFilesDownloadInfo, DexMetadataURL);
+
+#[derive(Clone, PartialEq, Message)]
+struct AcquireRequest {
+    #[prost(message, optional, tag = "1")]
+    package: Option<AcquirePackage>,
+    #[prost(message, optional, tag = "12")]
+    version: Option<AcquireVersion>,
+    #[prost(uint32, optional, tag = "13")]
+    offer_type: Option<u32>,
+    #[prost(uint32, optional, tag = "15")]
+    field_15: Option<u32>,
+    #[prost(string, optional, tag = "22")]
+    nonce: Option<String>,
+    #[prost(uint32, optional, tag = "25")]
+    field_25: Option<u32>,
+    #[prost(message, optional, tag = "30")]
+    message_30: Option<AcquireMessage30>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AcquirePackage {
+    #[prost(message, optional, tag = "1")]
+    payload: Option<AcquirePackagePayload>,
+    #[prost(uint32, optional, tag = "2")]
+    field_2: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AcquirePackagePayload {
+    #[prost(string, optional, tag = "1")]
+    package_name: Option<String>,
+    #[prost(uint32, optional, tag = "2")]
+    field_2: Option<u32>,
+    #[prost(uint32, optional, tag = "3")]
+    field_3: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AcquireVersion {
+    #[prost(uint64, optional, tag = "1")]
+    version_code: Option<u64>,
+    #[prost(uint32, optional, tag = "3")]
+    field_3: Option<u32>,
+}
+
+#[derive(Clone, PartialEq, Message)]
+struct AcquireMessage30 {
+    #[prost(uint32, optional, tag = "1")]
+    field_1: Option<u32>,
+    #[prost(uint32, optional, tag = "2")]
+    field_2: Option<u32>,
+}
+
+fn build_acquire_request(
+    package_name: String,
+    version_code: u64,
+    offer_type: u32,
+    nonce: String,
+) -> AcquireRequest {
+    AcquireRequest {
+        package: Some(AcquirePackage {
+            payload: Some(AcquirePackagePayload {
+                package_name: Some(package_name),
+                field_2: Some(1),
+                field_3: Some(3),
+            }),
+            field_2: Some(1),
+        }),
+        version: Some(AcquireVersion {
+            version_code: Some(version_code),
+            field_3: Some(0),
+        }),
+        offer_type: Some(offer_type),
+        field_15: Some(0),
+        nonce: Some(nonce),
+        field_25: Some(2),
+        message_30: Some(AcquireMessage30 {
+            field_1: Some(2),
+            field_2: Some(0),
+        }),
+    }
+}
 
 #[derive(Debug)]
 pub struct Gpapi {
@@ -565,6 +649,12 @@ impl Gpapi {
         if version_code.is_none() {
             version_code = Some(self.get_latest_version_for_pkg_name(&pkg_name).await?);
         }
+        // Current Aurora clients acquire the app before asking the legacy purchase endpoint for a
+        // delivery token. Anonymous dispenser accounts may otherwise return an empty buy response
+        // for free apps that have not yet been associated with that account. Acquisition is best
+        // effort because purchase remains the authoritative operation and older servers may not
+        // implement the endpoint.
+        let _ = self.acquire(&pkg_name, version_code.unwrap(), 1).await;
         let resp = {
             let version_code_string = version_code.unwrap().to_string();
             let mut params = HashMap::new();
@@ -591,6 +681,35 @@ impl Gpapi {
             }
         }
         Err(GpapiError::new(GpapiErrorKind::InvalidApp))
+    }
+
+    async fn acquire(
+        &self,
+        pkg_name: &str,
+        version_code: i64,
+        offer_type: u32,
+    ) -> Result<(), Box<dyn Error>> {
+        let version_code = u64::try_from(version_code)
+            .map_err(|_| GpapiError::new(GpapiErrorKind::InvalidApp))?;
+        let mut nonce_bytes = [0_u8; 256];
+        rand::rng().fill_bytes(&mut nonce_bytes);
+        let request = build_acquire_request(
+            pkg_name.to_string(),
+            version_code,
+            offer_type,
+            format!("nonce={}", URL_SAFE_NO_PAD.encode(nonce_bytes)),
+        );
+        let mut bytes = Vec::with_capacity(request.encoded_len());
+        request.encode(&mut bytes)?;
+        self.execute_request_helper(
+            "acquire",
+            None,
+            Some(&bytes),
+            self.get_default_headers()?,
+            true,
+        )
+        .await?;
+        Ok(())
     }
 
 
@@ -1382,6 +1501,34 @@ mod tests {
             api.append_auth_params(&mut params);
 
             assert_eq!(params.get("droidguard_results"), Some(&"null".to_string()));
+        }
+
+        #[test]
+        fn acquire_request_matches_current_aurora_shape() {
+            let request = build_acquire_request(
+                "ru.wildberries.team".to_string(),
+                61_921,
+                1,
+                "nonce=test".to_string(),
+            );
+            let mut bytes = Vec::new();
+            request.encode(&mut bytes).unwrap();
+            let decoded = AcquireRequest::decode(bytes.as_slice()).unwrap();
+            let package = decoded.package.unwrap();
+            let payload = package.payload.unwrap();
+
+            assert_eq!(payload.package_name.as_deref(), Some("ru.wildberries.team"));
+            assert_eq!(payload.field_2, Some(1));
+            assert_eq!(payload.field_3, Some(3));
+            assert_eq!(package.field_2, Some(1));
+            assert_eq!(decoded.version.unwrap().version_code, Some(61_921));
+            assert_eq!(decoded.offer_type, Some(1));
+            assert_eq!(decoded.field_15, Some(0));
+            assert_eq!(decoded.nonce.as_deref(), Some("nonce=test"));
+            assert_eq!(decoded.field_25, Some(2));
+            let message_30 = decoded.message_30.unwrap();
+            assert_eq!(message_30.field_1, Some(2));
+            assert_eq!(message_30.field_2, Some(0));
         }
 
         #[test]
