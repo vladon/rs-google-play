@@ -228,6 +228,95 @@ impl Gpapi {
         self.timezone = timezone.into();
     }
 
+    /// Export the active device profile in the string map format accepted by Aurora Dispenser's
+    /// `POST /api/auth` endpoint.
+    ///
+    /// The returned map contains device metadata only. It does not include account credentials,
+    /// authentication tokens, cookies, or generated device identifiers.
+    pub fn dispenser_device_properties(&self) -> HashMap<String, String> {
+        let mut properties = self.device_properties.extra_info.clone();
+        let configuration = &self.device_properties.device_configuration;
+        let checkin = &self.device_properties.android_checkin;
+
+        insert_optional(
+            &mut properties,
+            "CellOperator",
+            checkin.cell_operator.as_ref(),
+        );
+        insert_optional(
+            &mut properties,
+            "SimOperator",
+            checkin.sim_operator.as_ref(),
+        );
+        insert_optional(&mut properties, "Roaming", checkin.roaming.as_ref());
+
+        if let Some(build) = &checkin.build {
+            insert_optional(&mut properties, "Build.FINGERPRINT", build.id.as_ref());
+            insert_optional(&mut properties, "Build.HARDWARE", build.product.as_ref());
+            insert_optional(&mut properties, "Build.BRAND", build.carrier.as_ref());
+            insert_optional(&mut properties, "Build.RADIO", build.radio.as_ref());
+            insert_optional(&mut properties, "Build.BOOTLOADER", build.bootloader.as_ref());
+            insert_optional(&mut properties, "Client", build.client.as_ref());
+            insert_optional_value(&mut properties, "GSF.version", build.google_services);
+            insert_optional(&mut properties, "Build.DEVICE", build.device.as_ref());
+            insert_optional_value(&mut properties, "Build.VERSION.SDK_INT", build.sdk_version);
+            insert_optional(&mut properties, "Build.MODEL", build.model.as_ref());
+            insert_optional(&mut properties, "Build.MANUFACTURER", build.manufacturer.as_ref());
+            insert_optional(&mut properties, "Build.PRODUCT", build.build_product.as_ref());
+            insert_optional_value(&mut properties, "OtaInstalled", build.ota_installed);
+        }
+
+        insert_optional_value(&mut properties, "TouchScreen", configuration.touch_screen);
+        insert_optional_value(&mut properties, "Keyboard", configuration.keyboard);
+        insert_optional_value(&mut properties, "Navigation", configuration.navigation);
+        insert_optional_value(&mut properties, "ScreenLayout", configuration.screen_layout);
+        insert_optional_value(
+            &mut properties,
+            "HasHardKeyboard",
+            configuration.has_hard_keyboard,
+        );
+        insert_optional_value(
+            &mut properties,
+            "HasFiveWayNavigation",
+            configuration.has_five_way_navigation,
+        );
+        insert_optional_value(&mut properties, "Screen.Density", configuration.screen_density);
+        insert_optional_value(&mut properties, "GL.Version", configuration.gl_es_version);
+        insert_list(
+            &mut properties,
+            "SharedLibraries",
+            &configuration.system_shared_library,
+        );
+        insert_list(
+            &mut properties,
+            "Features",
+            &configuration.system_available_feature,
+        );
+        insert_list(&mut properties, "Platforms", &configuration.native_platform);
+        insert_optional_value(&mut properties, "Screen.Width", configuration.screen_width);
+        insert_optional_value(&mut properties, "Screen.Height", configuration.screen_height);
+        insert_list(
+            &mut properties,
+            "Locales",
+            &configuration.system_supported_locale,
+        );
+        insert_list(&mut properties, "GL.Extensions", &configuration.gl_extension);
+        insert_optional_value(&mut properties, "LowRamDevice", configuration.low_ram_device);
+        insert_optional_value(
+            &mut properties,
+            "TotalMemoryBytes",
+            configuration.total_memory_bytes,
+        );
+        insert_optional_value(
+            &mut properties,
+            "MaxNumOfCPUCores",
+            configuration.max_num_of_cpu_cores,
+        );
+        properties.insert("TimeZone".to_string(), self.timezone.clone());
+
+        properties
+    }
+
     /// Set the aas token. This can be requested via `request_aas_token`, and is required for most
     /// other actions.
     pub fn set_aas_token<S: Into<String>>(&mut self, aas_token: S) {
@@ -1060,6 +1149,26 @@ impl Gpapi {
 
 }
 
+fn insert_optional(properties: &mut HashMap<String, String>, key: &str, value: Option<&String>) {
+    if let Some(value) = value {
+        properties.insert(key.to_string(), value.clone());
+    }
+}
+
+fn insert_optional_value<T: ToString>(
+    properties: &mut HashMap<String, String>,
+    key: &str,
+    value: Option<T>,
+) {
+    if let Some(value) = value {
+        properties.insert(key.to_string(), value.to_string());
+    }
+}
+
+fn insert_list(properties: &mut HashMap<String, String>, key: &str, values: &[String]) {
+    properties.insert(key.to_string(), values.join(","));
+}
+
 fn parse_form_reply(data: &str) -> HashMap<String, String> {
     let mut form_resp = HashMap::new();
     let lines: Vec<&str> = data.split_terminator('\n').collect();
@@ -1273,6 +1382,33 @@ mod tests {
             api.append_auth_params(&mut params);
 
             assert_eq!(params.get("droidguard_results"), Some(&"null".to_string()));
+        }
+
+        #[test]
+        fn dispenser_device_properties_match_selected_profile() {
+            let mut api = Gpapi::new("px_9a", "example@example.com");
+            api.set_timezone("Europe/Moscow");
+
+            let properties = api.dispenser_device_properties();
+
+            assert_eq!(properties.get("Build.MODEL"), Some(&"Pixel 9a".to_string()));
+            assert_eq!(properties.get("Build.DEVICE"), Some(&"tegu".to_string()));
+            assert_eq!(properties.get("Build.HARDWARE"), Some(&"tegu".to_string()));
+            assert_eq!(properties.get("Platforms"), Some(&"arm64-v8a".to_string()));
+            assert_eq!(
+                properties.get("HasHardKeyboard"),
+                Some(&"false".to_string())
+            );
+            assert_eq!(
+                properties.get("TimeZone"),
+                Some(&"Europe/Moscow".to_string())
+            );
+            assert!(properties.contains_key("Build.FINGERPRINT"));
+            assert!(properties.contains_key("Vending.version"));
+            assert!(properties.contains_key("GSF.version"));
+            assert!(properties.contains_key("Features"));
+            assert!(!properties.contains_key("email"));
+            assert!(!properties.contains_key("auth"));
         }
 
         #[tokio::test]
