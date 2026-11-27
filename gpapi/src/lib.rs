@@ -311,6 +311,27 @@ impl Gpapi {
         self.timezone = timezone.into();
     }
 
+    /// Route every Play API request through the given proxy URL
+    /// (`http://`, `https://`, `socks5://`, or `socks5h://`).
+    ///
+    /// An explicit proxy replaces proxy environment variables: the internal
+    /// client is rebuilt with this proxy only. `None` restores the default
+    /// client, which again honors proxy environment variables.
+    pub fn set_proxy(&mut self, proxy: Option<&str>) -> Result<(), GpapiError> {
+        let mut builder = reqwest::Client::builder();
+        if let Some(url) = proxy {
+            let proxy = reqwest::Proxy::all(url).map_err(|_| {
+                GpapiError::new(GpapiErrorKind::Str(String::from("invalid proxy url")))
+            })?;
+            builder = builder.no_proxy().proxy(proxy);
+        }
+        let client = builder
+            .build()
+            .map_err(|e| GpapiError::new(GpapiErrorKind::Other(Box::new(e))))?;
+        self.client = Box::new(client);
+        Ok(())
+    }
+
     /// Export the active device profile in the string map format accepted by Aurora Dispenser's
     /// `POST /api/auth` endpoint.
     ///
@@ -1566,6 +1587,20 @@ mod tests {
                     assert!(api.details("com.viber.voip").await.is_ok());
                 }
             }
+        }
+
+        #[test]
+        fn test_set_proxy_accepts_valid_url() {
+            let mut api = Gpapi::new("px_9a", "test@gmail.com");
+            assert!(api.set_proxy(Some("socks5://127.0.0.1:1080")).is_ok());
+            assert!(api.set_proxy(Some("http://127.0.0.1:8080")).is_ok());
+            assert!(api.set_proxy(None).is_ok());
+        }
+
+        #[test]
+        fn test_set_proxy_rejects_unusable_url() {
+            let mut api = Gpapi::new("px_9a", "test@gmail.com");
+            assert!(api.set_proxy(Some("not a proxy url")).is_err());
         }
 
         #[tokio::test]
